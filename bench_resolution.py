@@ -1,15 +1,16 @@
 """Benchmark single-step UNet inference at different resolutions on 3090."""
 
-import torch
 import time
+
+import torch
+
+from drifting_vs_diffusion.models.unet import UNet
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
 device = torch.device("cuda")
-
-from drifting_vs_diffusion.models.unet import UNet
 
 resolutions = [32, 64, 128, 256]
 
@@ -37,7 +38,6 @@ for res in resolutions:
         torch.cuda.synchronize()
     except RuntimeError as e:
         print(f"{res}x{res}: OOM or error: {e}")
-        del model
         torch.cuda.empty_cache()
         continue
 
@@ -58,7 +58,6 @@ for res in resolutions:
     mem = torch.cuda.max_memory_allocated() / 1e9
     print(f"{res:>4d}x{res:<4d} | {avg*1000:>7.1f} ms | {fps:>6.1f} FPS | {mem:.1f} GB | {n_params/1e6:.1f}M params")
 
-    del model
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 

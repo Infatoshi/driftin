@@ -42,7 +42,6 @@ def compute_drift(gen, pos, temp=0.05):
         V: [N, D] drift vectors (in normalized feature space)
     """
     N, D = gen.shape
-    G = N
 
     # Normalize features so avg pairwise distance ~ sqrt(D)
     y_neg = gen  # negatives = generated batch

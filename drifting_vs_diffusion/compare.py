@@ -10,7 +10,7 @@ import torch
 from torchvision import datasets, transforms
 from torchvision.utils import make_grid, save_image
 
-from .config import UNetConfig, DDPMConfig
+from .config import UNetConfig
 from .models.unet import UNet
 from .training.ddpm_utils import DDPMSchedule
 from .eval.sample import drift_sample, save_sample_grid, generate_fid_images, save_cifar10_images

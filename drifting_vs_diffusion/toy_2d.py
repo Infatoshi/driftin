@@ -12,7 +12,6 @@ import torch.nn.functional as F
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
 from .training.compute_v import compute_drift
 

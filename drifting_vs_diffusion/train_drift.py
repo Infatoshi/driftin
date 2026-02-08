@@ -8,7 +8,6 @@ import time
 import csv
 import argparse
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.models import resnet18, ResNet18_Weights

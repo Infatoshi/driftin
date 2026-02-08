@@ -7,16 +7,13 @@ Usage: uv run python3 bench_inference_full.py
 """
 
 import torch
-import torch.nn as nn
 import numpy as np
-import time
 import csv
 import os
 import json
 import gc
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List
 
 from drifting_vs_diffusion.config import UNetConfig
 from drifting_vs_diffusion.models.unet import UNet
@@ -86,13 +83,12 @@ def cuda_event_timing(model, batch_size, n_warmup, n_iters, dtype=torch.bfloat16
 
     # CUDA graph capture (if requested)
     graph = None
-    static_output = None
     if use_cuda_graph:
         # Capture
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
-                static_output = model(static_input)
+                _ = model(static_input)
         torch.cuda.synchronize()
 
     # Timed iterations using CUDA events
@@ -154,7 +150,7 @@ def main():
     print(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
     print(f"Batch sizes: {BATCH_SIZES}")
     print(f"Warmup: {N_WARMUP}, Iterations: {N_ITERS}")
-    print(f"Timing: CUDA events (GPU-side, no CPU overhead)")
+    print("Timing: CUDA events (GPU-side, no CPU overhead)")
     print()
 
     all_results = []
@@ -251,7 +247,7 @@ def main():
             if match:
                 row += f" | {match[0].per_image_ms:>5.2f}"
             else:
-                row += f" |   OOM"
+                row += " |   OOM"
         print(row)
 
     print()
@@ -272,7 +268,7 @@ def main():
             if match:
                 row += f" | {match[0].throughput:>5.0f}"
             else:
-                row += f" |   OOM"
+                row += " |   OOM"
         print(row)
 
     # ── Save CSV ─────────────────────────────────────────────────────────

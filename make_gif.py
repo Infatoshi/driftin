@@ -263,7 +263,6 @@ def main():
     # requantization (which causes pixel flicker on the static drift side)
     print("Quantizing to global palette...")
     palette_img = frames[-1].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-    palette = palette_img.getpalette()
     quantized = []
     for f in frames:
         q = f.quantize(palette=palette_img, dither=Image.Dither.NONE)

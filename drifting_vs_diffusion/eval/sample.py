@@ -2,7 +2,6 @@
 
 import os
 import torch
-import numpy as np
 from torchvision.utils import make_grid, save_image
 
 
