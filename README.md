@@ -60,6 +60,12 @@ We trained both DDPM and Drifting on CIFAR-10, sharing the exact same UNet backb
 
 Key insight: **feature encoder quality matters more than batch size**. DINOv2 with 4x smaller batch (1024) produced better images than ResNet-18 with 4x larger batch (4096).
 
+### Training loss curves
+
+![Loss Curves](assets/loss_curves.png)
+
+DDPM loss (left) converges cleanly from 0.045 to 0.022 over 50k steps. Drift losses (right) are noisy and flat by design -- the drift normalization (lambda_j) rescales V to unit per-dimension variance, so the absolute loss value is not a convergence metric. The actual signal is in sample quality, not the loss curve.
+
 ### Batch generation comparison
 
 ![Batch Comparison](assets/drifting_vs_diffusion_batch.gif)
