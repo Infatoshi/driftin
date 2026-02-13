@@ -148,11 +148,13 @@ class UNet(nn.Module):
         attn_resolutions=(16,),
         dropout=0.1,
         num_heads=4,
+        num_classes=0,
     ):
         super().__init__()
         self.base_ch = base_ch
         self.ch_mult = ch_mult
         self.num_res_blocks = num_res_blocks
+        self.num_classes = num_classes
         time_dim = base_ch * 4
 
         # Time embedding MLP
@@ -161,6 +163,10 @@ class UNet(nn.Module):
             nn.SiLU(),
             nn.Linear(time_dim, time_dim),
         )
+
+        # Class conditioning (added to time embedding)
+        if num_classes > 0:
+            self.class_embed = nn.Embedding(num_classes, time_dim)
 
         # Input conv
         self.conv_in = nn.Conv2d(in_ch, base_ch, 3, padding=1)
@@ -216,11 +222,12 @@ class UNet(nn.Module):
         nn.init.zeros_(self.conv_out.weight)
         nn.init.zeros_(self.conv_out.bias)
 
-    def forward(self, x, t=None):
+    def forward(self, x, t=None, class_labels=None):
         """
         Args:
             x: [B, C, H, W] input image (noisy for DDPM, noise for drift)
             t: [B] integer timesteps. If None, uses t=0 (for drift model).
+            class_labels: [B] integer class labels. Only used when num_classes > 0.
 
         Returns:
             [B, C, H, W] predicted noise (DDPM) or generated image (drift)
@@ -232,6 +239,10 @@ class UNet(nn.Module):
         # Time embedding
         temb = timestep_embedding(t, self.base_ch)
         temb = self.time_embed(temb)
+
+        # Class conditioning
+        if self.num_classes > 0 and class_labels is not None:
+            temb = temb + self.class_embed(class_labels)
 
         # Input
         h = self.conv_in(x)

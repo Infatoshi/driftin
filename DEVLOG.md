@@ -352,10 +352,106 @@ outputs/                          -- On 8xH100 remote
 
 ---
 
-## 12. Summary
+## 12. Scaling to 256x256: Latent-Space Drifting
 
-Single-step generation via drift fields is viable and improving rapidly. Across 9 encoder configurations, **DINOv3 multi-res** produced clearly recognizable CIFAR-10 images -- dogs, horses, birds, cars, frogs -- all from a single forward pass. The quality gap with DDPM remains significant but is narrowing with better feature encoders.
+### Architecture
 
-The key finding from our encoder sweep: **representation quality of the frozen encoder is the single most important factor for drift generation quality.** DINOv3 (7B-param teacher, 1.7B training images) dramatically outperforms all other encoders. The multi-resolution extraction strategy matters less than the encoder itself -- DINOv2 CLS (single vector) beats DINOv2 multi-res (72 vectors), while DINOv3 multi-res is the overall winner.
+To generate at 256x256, we moved to latent space:
+- **UNet** generates 32x32x4 latents (same architecture, just in_ch=4, out_ch=4)
+- **SD VAE** (stabilityai/sd-vae-ft-mse, 83.7M params, frozen) decodes latents to 256x256 RGB
+- **DINOv3 ViT-B/16** (85.6M params, frozen) extracts multi-res features from decoded images
+- Gradient flows: drift loss -> DINOv3 -> VAE decode -> UNet
 
-The path forward is clear: (1) use the best available pretrained vision encoder, (2) scale batch size during training, and (3) move to latent space for higher resolutions. Inference is already 50x faster than DDPM and has significant room for further optimization via quantization, kernel fusion, and CUDA graphs.
+The VAE decoder is gradient-checkpointed to fit in memory. It's also the training bottleneck (~70ms on H100 at bs=16, vs 5.5ms for UNet and 7ms for DINOv3).
+
+### Component Benchmarks (H100, single GPU)
+
+| Component | bs=16 | bs=32 | bs=64 |
+|---|---|---|---|
+| UNet fwd (compiled) | 5.5ms | 6.0ms | 7.7ms |
+| VAE decode (grad ckpt) | 70.7ms | 140.3ms | 271.9ms |
+| DINOv3 real (no grad) | 7.3ms | 13.3ms | 24.6ms |
+| DINOv3 gen (with grad) | 16.1ms | 22.6ms | 43.1ms |
+| Drift (L=72) | 1.5ms | 1.5ms | 1.8ms |
+| **Full step** | **218ms** | **399ms** | **737ms** |
+| Peak memory | 14 GB | 26.5 GB | 51.6 GB |
+
+Max per-GPU batch on H100 80GB: ~96. Optimal throughput at bs=32/GPU.
+
+### Encoder Benchmarks (H100, bs=32, forward pass)
+
+| Encoder | Params | No-grad | With grad | Est. step | 50K hours |
+|---|---|---|---|---|---|
+| DINOv3 ViT-B/16 | 85.6M | 21.8ms | 49.0ms | 218ms | 3.0h |
+| DINOv3 ViT-L/16 | 303M | 25.1ms | 126.6ms | 299ms | 4.2h |
+| DINOv3 ViT-H+/16 | 841M | 111.9ms | 253.3ms | 513ms | 7.1h |
+| AIMv2-Large | ~300M | 37.3ms | 98.2ms | 283ms | 3.9h |
+| AIMv2-Huge | ~600M | 64.6ms | 165.8ms | 378ms | 5.2h |
+| SigLIP2 SO400M | ~400M | 60.9ms | 157.6ms | 366ms | 5.1h |
+| RADIO v2.5-L | ~300M | 28.7ms | 74.2ms | 250ms | 3.5h |
+
+### Exp 5: FFHQ 256x256 (8xH100)
+
+- **Config:** 38M UNet, DINOv3 ViT-B/16, bs=32/GPU (global 256), 50K steps
+- **Duration:** ~5.8h, 419ms/step, 611 img/s
+- **Dataset:** FFHQ 256x256, 70K face images
+- **Result:** Good single-step face generation. Faces progress from blobs (5K) to recognizable (10K) to sharp with detail (50K). Diverse poses, lighting, expressions.
+
+### Exp 6: ImageNet 256x256, Unconditional (8xH100)
+
+- **Config:** 38M UNet, DINOv3 ViT-B/16, bs=32/GPU (global 256), 50K steps, unconditional
+- **Duration:** ~5.8h, 419ms/step, 611 img/s
+- **Dataset:** ImageNet-1k 256x256, 1.28M images, 1000 classes
+- **Result:** Severe mode collapse. Individual images are sharp and coherent, but the model only produces ~15-20 recurring subjects out of 1000 classes (bulldogs, propeller planes, woven baskets, jars, ships, sheep, owls). The 38M UNet without class guidance can't cover the full distribution.
+
+### Exp 7: ImageNet 256x256, Capacity + Conditioning Ablation (8xH100)
+
+To disentangle the effect of model capacity vs class conditioning, we ran 3 experiments at 10K steps each:
+
+| Experiment | UNet | Params | Conditioning | ms/step | Result |
+|---|---|---|---|---|---|
+| Small + cond | base_ch=128, 2 res blocks | 38.8M | 1000 classes | 475 | Recognizable objects, limited diversity |
+| Large uncond | base_ch=256, 3 res blocks, attn@16+8 | 210M | none | 479 | Brown blobs, hasn't converged |
+| Large + cond | base_ch=256, 3 res blocks, attn@16+8 | 211M | 1000 classes | 475 | **Best -- diverse objects, coherent shapes** |
+
+Class conditioning is implemented via `nn.Embedding(num_classes, time_dim)` added to the timestep embedding before it enters the ResBlocks.
+
+**Key finding: class conditioning is the dominant factor** at matched step count. The 210M unconditional model produces worse results than the 38M conditioned model -- it needs far more training steps without the guidance signal to disambiguate 1000 classes. The large + conditioned model combines capacity with guidance and is the clear winner.
+
+---
+
+## 13. Updated File Reference
+
+```
+drifting_vs_diffusion/
+  config.py                       -- UNetConfig, UNetLargeConfig, DDPMConfig, DriftConfig, LatentDriftConfig
+  train_ddpm.py                   -- Single-GPU DDPM training
+  train_ddpm_ddp.py               -- Multi-GPU DDP DDPM training
+  train_drift.py                  -- Single-GPU drift training
+  train_drift_ddp.py              -- Multi-GPU DDP drift training (ResNet-18 + DINOv2 encoders)
+  train_drift_multires_ddp.py     -- Multi-GPU DDP training with multi-res encoders (CIFAR)
+  train_drift_latent_ddp.py       -- 256x256 latent-space training (--large, --num-classes)
+  models/
+    unet.py                       -- Shared UNet (AdaGN, SelfAttention, ResBlock, class conditioning)
+    ema.py                        -- EMA wrapper
+  training/
+    compute_v.py                  -- Drift field computation (single-vector + batched multi-res)
+    encoders.py                   -- Multi-res feature encoders (DINOv3/v3-L/v3-H+, AIMv2, RADIO, DINOv2, MoCo-v2, ConvNeXt-v2, EVA-02, SigLIP-2, CLIP)
+    ddpm_utils.py                 -- DDPM noise schedule, q_sample, DDIM sampling
+  eval/
+    sample.py                     -- Grid sampling utilities
+    sample_latent.py              -- Latent-space sampling
+    fid.py                        -- FID computation
+```
+
+---
+
+## 14. Summary
+
+Single-step generation via drift fields scales from CIFAR-10 (32x32) to 256x256 through latent-space generation. Across all experiments, two findings dominate:
+
+1. **Encoder quality is the single most important factor.** DINOv3 dramatically outperforms all other encoders (DINOv2, SigLIP-2, MoCo-v2, CLIP, EVA-02, ConvNeXt-v2) for drift field computation. The quality of pretrained visual representations transfers directly into generation quality.
+
+2. **Class conditioning is critical for diverse datasets.** On ImageNet-1k (1000 classes), a 38M-param conditioned UNet outperforms a 210M-param unconditional UNet at matched step count. The guidance signal helps the model allocate capacity to quality rather than mode selection.
+
+The latent-space pipeline (UNet on 32x32x4 latents, VAE decode to 256x256) runs at 611 img/s on 8xH100 during training. FFHQ faces look good at 50K steps. ImageNet requires class conditioning and larger models for full mode coverage.

@@ -9,6 +9,11 @@ Supported encoders:
 - ConvNeXt-v2: 4 stage feature maps from ConvNeXt-v2-Base
 - MoCo-v2: 4 stage feature maps from ResNet-50 with self-supervised weights
 - DINOv3 multi-res: patch tokens from 4 intermediate ViT layers (DINOv3 ViT-B/16)
+- DINOv3-L: DINOv3 ViT-L/16 (303M, D=1024, 24 layers)
+- DINOv3-H+: DINOv3 ViT-H+/16 (841M, D=1280, 32 layers)
+- AIMv2-L: Apple AIMv2 Large (309M, D=1024, autoregressive self-supervised)
+- AIMv2-H: Apple AIMv2 Huge (681M, D=1536)
+- RADIO: NVIDIA RADIO v2.5-L (320M, multi-teacher distillation)
 - EVA-02 multi-res: intermediate features from EVA-02 ViT-B/14 via timm
 - SigLIP-2 multi-res: patch tokens from 4 intermediate layers (SigLIP-2 Base)
 - CLIP multi-res: patch tokens from OpenCLIP ViT-B/16
@@ -236,6 +241,241 @@ class DINOv3MultiResEncoder(nn.Module):
         return _group_by_channel_dim(all_groups)
 
 
+class DINOv3LargeMultiResEncoder(nn.Module):
+    """Frozen DINOv3 ViT-L/16 (303M params, D=1024, 24 layers).
+
+    3.5x params over ViT-B. Distilled from ViT-7B. Uses RoPE.
+    """
+
+    def __init__(self, pool_size=4, input_size=224):
+        super().__init__()
+        self.pool_size = pool_size
+        self.input_size = input_size
+        import timm
+        self.model = timm.create_model(
+            'vit_large_patch16_dinov3.lvd1689m',
+            pretrained=True,
+            num_classes=0,
+        )
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        self.patch_size = 16
+        self.hidden_size = 1024
+        # 24 layers: pick 4 evenly spaced
+        self.layer_indices = [5, 11, 17, 23]
+
+    def forward(self, x):
+        x = (x + 1) / 2
+        x = (x - self.mean) / self.std
+        ps = self.patch_size
+        target_size = (self.input_size // ps) * ps
+        x = F.interpolate(x, size=(target_size, target_size), mode='bilinear', align_corners=False)
+
+        final_feat, intermediates = self.model.forward_intermediates(
+            x, indices=self.layer_indices
+        )
+
+        all_groups = []
+        for feat_map in intermediates:
+            if feat_map.dim() == 3:
+                h_p = target_size // ps
+                feat_map = feat_map.transpose(1, 2).reshape(-1, self.hidden_size, h_p, h_p)
+            groups = _extract_spatial_features(feat_map, self.pool_size)
+            all_groups.extend(groups)
+
+        return _group_by_channel_dim(all_groups)
+
+
+class DINOv3HugePlusMultiResEncoder(nn.Module):
+    """Frozen DINOv3 ViT-H+/16 (841M params, D=1280, 32 layers).
+
+    10x params over ViT-B. Distilled from ViT-7B. Uses RoPE.
+    """
+
+    def __init__(self, pool_size=4, input_size=224):
+        super().__init__()
+        self.pool_size = pool_size
+        self.input_size = input_size
+        import timm
+        self.model = timm.create_model(
+            'vit_huge_plus_patch16_dinov3.lvd1689m',
+            pretrained=True,
+            num_classes=0,
+        )
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        self.patch_size = 16
+        self.hidden_size = 1280
+        # 32 layers: pick 4 evenly spaced
+        self.layer_indices = [7, 15, 23, 31]
+
+    def forward(self, x):
+        x = (x + 1) / 2
+        x = (x - self.mean) / self.std
+        ps = self.patch_size
+        target_size = (self.input_size // ps) * ps
+        x = F.interpolate(x, size=(target_size, target_size), mode='bilinear', align_corners=False)
+
+        final_feat, intermediates = self.model.forward_intermediates(
+            x, indices=self.layer_indices
+        )
+
+        all_groups = []
+        for feat_map in intermediates:
+            if feat_map.dim() == 3:
+                h_p = target_size // ps
+                feat_map = feat_map.transpose(1, 2).reshape(-1, self.hidden_size, h_p, h_p)
+            groups = _extract_spatial_features(feat_map, self.pool_size)
+            all_groups.extend(groups)
+
+        return _group_by_channel_dim(all_groups)
+
+
+class AIMv2MultiResEncoder(nn.Module):
+    """Frozen AIMv2 with multi-resolution feature extraction via timm.
+
+    Apple's autoregressive image model. Self-supervised (no language).
+    Supports Large (309M, D=1024) and Huge (681M, D=1536).
+    """
+
+    def __init__(self, pool_size=4, input_size=224, variant="large"):
+        super().__init__()
+        self.pool_size = pool_size
+        self.input_size = input_size
+        import timm
+
+        if variant == "large":
+            model_name = 'aimv2_large_patch14_224.apple_pt'
+            self.hidden_size = 1024
+            n_blocks = 24
+        elif variant == "huge":
+            model_name = 'aimv2_huge_patch14_224.apple_pt'
+            self.hidden_size = 1536
+            n_blocks = 32
+        else:
+            raise ValueError(f"Unknown AIMv2 variant: {variant}")
+
+        self.model = timm.create_model(model_name, pretrained=True, num_classes=0)
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        self.patch_size = 14
+        # Pick 4 evenly spaced layers
+        self.layer_indices = [
+            n_blocks // 4 - 1,
+            n_blocks // 2 - 1,
+            3 * n_blocks // 4 - 1,
+            n_blocks - 1,
+        ]
+
+    def forward(self, x):
+        x = (x + 1) / 2
+        x = (x - self.mean) / self.std
+        ps = self.patch_size
+        target_size = (self.input_size // ps) * ps
+        x = F.interpolate(x, size=(target_size, target_size), mode='bilinear', align_corners=False)
+
+        final_feat, intermediates = self.model.forward_intermediates(
+            x, indices=self.layer_indices
+        )
+
+        h_p = target_size // ps
+        all_groups = []
+        for feat_map in intermediates:
+            if feat_map.dim() == 3:
+                feat_map = feat_map.transpose(1, 2).reshape(-1, self.hidden_size, h_p, h_p)
+            groups = _extract_spatial_features(feat_map, self.pool_size)
+            all_groups.extend(groups)
+
+        return _group_by_channel_dim(all_groups)
+
+
+class RADIOMultiResEncoder(nn.Module):
+    """Frozen NVIDIA RADIO v2.5-L (320M, D=1024) with multi-res extraction.
+
+    Multi-teacher distillation from CLIP + DINOv2 + SAM.
+    Loaded via torch.hub.
+    """
+
+    def __init__(self, pool_size=4, input_size=224):
+        super().__init__()
+        self.pool_size = pool_size
+        self.input_size = input_size
+        self.hidden_size = 1024
+        self.patch_size = 16
+
+        self.radio = torch.hub.load(
+            'NVlabs/RADIO', 'radio_model', version='radio_v2.5-l',
+            progress=False, trust_repo=True,
+        )
+        self.radio.eval()
+        for param in self.radio.parameters():
+            param.requires_grad = False
+
+        # RADIO expects ImageNet normalization
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+        # Hook intermediate layers from the inner ViT
+        inner = self.radio.model
+        n_blocks = len(inner.blocks)
+        self.layer_indices = [
+            n_blocks // 4 - 1,
+            n_blocks // 2 - 1,
+            3 * n_blocks // 4 - 1,
+            n_blocks - 1,
+        ]
+        self._intermediate_features = []
+        self._hooks = []
+        for idx in self.layer_indices:
+            h = inner.blocks[idx].register_forward_hook(self._make_hook())
+            self._hooks.append(h)
+
+    def _make_hook(self):
+        storage = []
+        self._intermediate_features.append(storage)
+        def hook_fn(module, input, output):
+            storage.clear()
+            storage.append(output)
+        return hook_fn
+
+    def forward(self, x):
+        x = (x + 1) / 2
+        x = (x - self.mean) / self.std
+        ps = self.patch_size
+        target_size = (self.input_size // ps) * ps
+        x = F.interpolate(x, size=(target_size, target_size), mode='bilinear', align_corners=False)
+
+        # Forward triggers hooks
+        summary, features = self.radio(x)
+
+        h_p = target_size // ps
+        all_groups = []
+        for storage in self._intermediate_features:
+            if storage:
+                feat = storage[0]  # [B, N, D]
+                # RADIO inner ViT has no CLS prefix in spatial features
+                # but the block output includes it; check shape
+                if feat.shape[1] > h_p * h_p:
+                    # Has prefix tokens, skip them
+                    n_prefix = feat.shape[1] - h_p * h_p
+                    feat = feat[:, n_prefix:, :]
+                feat_map = feat.transpose(1, 2).reshape(-1, self.hidden_size, h_p, h_p)
+                groups = _extract_spatial_features(feat_map, self.pool_size)
+                all_groups.extend(groups)
+
+        return _group_by_channel_dim(all_groups)
+
+
 class EVA02MultiResEncoder(nn.Module):
     """Frozen EVA-02 ViT-B/14 with multi-resolution feature extraction via timm.
 
@@ -402,6 +642,7 @@ def build_encoder(name, pool_size=4, input_size=112):
 
     Args:
         name: one of 'dinov2-multires', 'convnextv2', 'mocov2', 'dinov3',
+              'dinov3-l', 'dinov3-h+', 'aimv2-l', 'aimv2-h', 'radio',
               'eva02', 'siglip2', 'clip'
         pool_size: target spatial pool size (default 4 -> 16 locations per stage)
         input_size: resize input to this before encoder (default 112, down from 224)
@@ -414,18 +655,32 @@ def build_encoder(name, pool_size=4, input_size=112):
         return MoCoV2Encoder(pool_size=pool_size, input_size=input_size)
     elif name == "dinov3":
         return DINOv3MultiResEncoder(pool_size=pool_size, input_size=input_size)
+    elif name == "dinov3-l":
+        sz = input_size if input_size >= 224 else 224
+        return DINOv3LargeMultiResEncoder(pool_size=pool_size, input_size=sz)
+    elif name == "dinov3-h+":
+        sz = input_size if input_size >= 224 else 224
+        return DINOv3HugePlusMultiResEncoder(pool_size=pool_size, input_size=sz)
+    elif name == "aimv2-l":
+        sz = input_size if input_size >= 224 else 224
+        return AIMv2MultiResEncoder(pool_size=pool_size, input_size=sz, variant="large")
+    elif name == "aimv2-h":
+        sz = input_size if input_size >= 224 else 224
+        return AIMv2MultiResEncoder(pool_size=pool_size, input_size=sz, variant="huge")
+    elif name == "radio":
+        sz = input_size if input_size >= 224 else 224
+        return RADIOMultiResEncoder(pool_size=pool_size, input_size=sz)
     elif name == "eva02":
         return EVA02MultiResEncoder(pool_size=pool_size, input_size=224)
     elif name == "siglip2":
-        # SigLIP-2 uses learned PE, safer at 224 unless overridden
         sz = input_size if input_size >= 224 else 224
         return SigLIP2MultiResEncoder(pool_size=pool_size, input_size=sz)
     elif name == "clip":
-        # CLIP uses learned PE, safer at 224 unless overridden
         sz = input_size if input_size >= 224 else 224
         return CLIPMultiResEncoder(pool_size=pool_size, input_size=sz)
     else:
         raise ValueError(
             f"Unknown encoder: {name}. Choose from: dinov2-multires, convnextv2, "
-            f"mocov2, dinov3, eva02, siglip2, clip"
+            f"mocov2, dinov3, dinov3-l, dinov3-h+, aimv2-l, aimv2-h, radio, "
+            f"eva02, siglip2, clip"
         )

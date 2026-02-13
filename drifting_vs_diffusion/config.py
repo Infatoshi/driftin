@@ -69,6 +69,31 @@ class DriftConfig:
 
 
 @dataclass
+class LatentDriftConfig:
+    """Config for latent-space drifting at 256x256 (via SD VAE)."""
+    # Training
+    batch_size: int = 16
+    lr: float = 2e-4
+    ema_decay: float = 0.9999
+    max_grad_norm: float = 2.0
+    total_steps: int = 50_000
+    temperatures: List[float] = field(default_factory=lambda: [0.02, 0.05, 0.2])
+    # Architecture
+    image_size: int = 256
+    latent_size: int = 32
+    latent_channels: int = 4
+    vae_model: str = "stabilityai/sd-vae-ft-mse"
+    # Feature encoder
+    encoder: str = "dinov3"
+    encoder_input_size: int = 224
+    pool_size: int = 4
+    # Logging
+    log_every: int = 100
+    sample_every: int = 5_000
+    save_every: int = 10_000
+
+
+@dataclass
 class MultiResDriftConfig:
     """Config for multi-resolution drift experiments."""
     # Training
